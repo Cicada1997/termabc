@@ -16,6 +16,70 @@ type Str = String;
 /// Exists to make the documentation easier to follow, might be removed
 pub type Static = &'static str;
 
+/**
+Recursively wrappes a string within the named width.
+
+## Example from [Examples/paner.rs](https://github.com/jackiboi307/termabc/blob/master/examples/paner.rs)
+```
+for (panetype, col, row, width, height) in panes {
+    let mut canvas = InstructionBuffer::new(width, height, Some(&default_style));
+
+    let (text, style) = match panetype {
+        PaneType::Normal => ("example text", None),
+        PaneType::Special => ("special text", Some(&default_style.with_fg(BrightGreen).bold())),
+        PaneType::Long => (LONG_TEXT, Some(&default_style.with_fg(Yellow).italic()))
+    };
+
+    // Instead of
+    canvas.addstr(0, 0, text, style);
+
+    // you can wrap the text
+    canvas.addstr_wrap(0, 0, text, style);
+
+    // or for more power
+    canvas.addstr(0, 0, wrap(text, width), style);
+    
+    // or possibly add padding like this
+    canvas.addstr(2, 0, wrap(text, width -4), style);
+
+    print!("{}", canvas.render(col, row));
+}
+```
+*/
+pub fn wrap(string: &str, width: Cell) -> Vec<&str> {
+
+    // Do i even need to wrap?
+    if string.len() as Cell <= width {
+        return vec![string];
+    }
+
+    // The method `.split_at(mid)` that is used below takes in the argument 
+    // `mid` that is supposed to be a byte index. To account for some 
+    // graphemes being more than one byte (thus preventing panics when trying 
+    // to "split" a character in half), the algorithm counts the bytes.
+    let mut byte_index  = 0;
+    let mut newline_idx = 0; // best place so far for a new line.
+    let mut lines = Vec::new();
+
+    // Split after latest word and recursively handle the rest.
+    for (idx, c) in string.graphemes(true).enumerate() {
+        byte_index += c.as_bytes().len();
+
+        if idx >= ( width -1 )/* len = idx+1 */ as usize {
+            let (line, rest) = string.split_at(newline_idx);
+            lines.push(line);
+            lines.append(&mut wrap(rest, width)); // Recursion occures here.
+            break;
+        }
+
+        if c.as_bytes() == " ".as_bytes() {
+            newline_idx = byte_index;
+        }
+    }
+
+    return lines;
+}
+
 pub trait Canvas {
     fn clear(&mut self);
     fn render(&self, col: Cell, row: Cell) -> Str;
@@ -23,11 +87,25 @@ pub trait Canvas {
     fn addcmd(&mut self, cmd: &str);
     fn setstyle(&mut self, style: Option<&Style>);
     fn setcursor(&mut self, col: Cell, row: Cell);
+    fn size(&self) -> (Cell, Cell);
 
     fn addstr(&mut self, col: Cell, row: Cell, string: &str, style: Option<&Style>) {
         self.setcursor(col, row);
         self.setstyle(style);
         self.addtext(string);
+    }
+
+    fn addstr_wrap(&mut self, col: Cell, row: Cell, string: &str, style: Option<&Style>) -> Cell {
+        let (max_w, _) = self.size();
+        let lines = wrap(string, max_w);
+
+        for (no, line) in lines.iter().enumerate() {
+            self.setcursor(col, row + no as Cell);
+            self.setstyle(style);
+            self.addtext(*line);
+        }
+
+        return lines.len() as Cell;
     }
 
     fn draw_hbar(&mut self, col: Cell, row: Cell, length: Cell, ch: &str, style: Option<&Style>) {
@@ -426,6 +504,8 @@ impl<'a> Canvas for InstructionBuffer<'a> {
 
         result
     }
+
+    fn size(&self) -> (Cell, Cell) { (self.width, self.height) }
 }
 
 pub enum PaneSize {
@@ -527,19 +607,34 @@ impl<T> Paner<T> {
 
                 let mut canvas = InstructionBuffer::new(width + 2, height + 2, None);
 
+                let     length  = if horizontal { width } else { height };
+                let mut excess  = (length - total_fixed) % total_rel;
+
+                let mut rel_pad = vec![0; paners.len()];
+                for (j, (size, _paner)) in paners.iter().enumerate() {
+                    if !(excess > 0) { break; }
+
+                    match size {
+                        PaneSize::Relative(size) => {
+                            excess -= 1;
+
+                            rel_pad.insert(j, *size);
+                        },
+                        _ => (),
+                    }
+                }
+
+
                 let mut i = 0;
                 for (j, (size, paner)) in paners.iter().enumerate() {
                     let size = match size {
                         PaneSize::Relative(size) => {
-                            let size = ((if horizontal { width } else { height })
-                                .saturating_sub(total_fixed) * size / total_rel)
+                            let mut size = (length.saturating_sub(total_fixed) * size / total_rel)
                                 .saturating_sub(gap) - 1;
 
-                            // extend the last element if it can not be perfect
-                            // TODO improve this and make it even
-                            let size = size + if j == paners.len() - 1 {
-                                (if horizontal { width } else { height }).saturating_sub(size + i)
-                            } else { 0 };
+                            if let Some(pad) = rel_pad.get(j) {
+                                size += pad;
+                            }
 
                             size
                         }
